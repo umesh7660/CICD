@@ -1,0 +1,103 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  AZURE_WEBAPP_NAME: smartmeter-app    
+  JAVA_VERSION: '8'              
+  DISTRIBUTION: 'adopt'          
+  FRONTEND_PATH: 'frontend'
+  BACKEND_PATH: 'backend'
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    environment: dev
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Set up JDK ${{ env.JAVA_VERSION }}
+      uses: actions/setup-java@v3
+      with:
+        java-version: ${{ env.JAVA_VERSION }}
+        distribution: ${{ env.DISTRIBUTION }}
+        cache: maven
+
+    - name: Build Backend with Maven
+      run: |
+        cd ${{ env.BACKEND_PATH }}
+        mvn clean install -DskipTests
+        
+    - name: Run Backend Tests
+      run: |
+        cd ${{ env.BACKEND_PATH }}
+        mvn test
+
+    - name: Set up Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '18'
+        cache: 'npm'
+        cache-dependency-path: ${{ env.FRONTEND_PATH }}/package-lock.json
+
+    - name: Install Frontend Dependencies
+      run: |
+        cd ${{ env.FRONTEND_PATH }}
+        npm ci
+
+    - name: Build Frontend
+      run: |
+        cd ${{ env.FRONTEND_PATH }}
+        npm run build
+
+    - name: Run Frontend Tests
+      run: |
+        cd ${{ env.FRONTEND_PATH }}
+        npm test -- --watchAll=false
+
+    - name: Azure Login
+      uses: azure/login@v1
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+    - name: Build and Push Backend Docker Image
+      run: |
+        cd ${{ env.BACKEND_PATH }}
+        docker build -t smartmeter-backend:${{ github.sha }} .
+        az acr build --registry smartmeterregistry --image smartmeter-backend:${{ github.sha }} .
+
+    - name: Build and Push Frontend Docker Image
+      run: |
+        cd ${{ env.FRONTEND_PATH }}
+        docker build -t smartmeter-frontend:${{ github.sha }} .
+        az acr build --registry smartmeterregistry --image smartmeter-frontend:${{ github.sha }} .
+
+    - name: Deploy to Azure Container Apps
+      uses: azure/container-apps-deploy-action@v1
+      with:
+        appSourcePath: ${{ env.BACKEND_PATH }}
+        acrName: smartmeterregistry
+        containerAppName: smartmeter-backend
+        resourceGroup: smartmeter-rg
+        imageToDeploy: smartmeterregistry.azurecr.io/smartmeter-backend:${{ github.sha }}
+
+    - name: Deploy Frontend to Azure Static Web Apps
+      uses: Azure/static-web-apps-deploy@v1
+      with:
+        azure_static_web_apps_api_token: ${{ secrets.AZURE_STATIC_WEB_APPS_API_TOKEN }}
+        repo_token: ${{ secrets.GITHUB_TOKEN }}
+        action: "upload"
+        app_location: "${{ env.FRONTEND_PATH }}"
+        output_location: "build"
+        skip_app_build: true
